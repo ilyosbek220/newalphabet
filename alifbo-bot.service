@@ -1,0 +1,13 @@
+[Unit]
+Description=Yangi alifbo Telegram boti
+After=network-online.target
+
+[Service]
+WorkingDirectory=/opt/alifbo_bot
+ExecStart=/opt/alifbo_bot/venv/bin/python bot.py
+Restart=always
+RestartSec=5
+User=alifbo
+
+[Install]
+WantedBy=multi-user.target

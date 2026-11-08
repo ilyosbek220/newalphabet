@@ -1,0 +1,19 @@
+# Environment variables (Xavfsizlik: tokenni GitHub ga chiqarmaslik uchun)
+.env
+.env.local
+
+# Database
+*.db
+*.db-journal
+*.sqlite3
+
+# Python cache & virtualenv
+__pycache__/
+*.py[cod]
+*$py.class
+*.tmp
+venv/
+.venv/
+env/
+.idea/
+.vscode/
