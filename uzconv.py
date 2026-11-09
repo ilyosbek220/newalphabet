@@ -162,23 +162,43 @@ def _latin_word(tok: str, exceptions: dict[str, str], flags: list[Flag]) -> str:
 # ---------------------------------------------------------------- kirill ----
 def _cyr_word(tok: str, flags: list[Flag]) -> str:
     out: list[str] = []
+    n = len(tok)
     for i, ch in enumerate(tok):
         lo = ch.lower()
         prev = tok[i - 1].lower() if i > 0 else ""
+        nxt = tok[i + 1].lower() if i + 1 < n else ""
         if lo == "е":
             r = "ye" if (i == 0 or prev in _CYR_VOWELS or prev == "ъ") else "e"
         elif lo == "ц":
-            r = "s" if (i > 0 and prev not in _CYR_VOWELS and prev != "ъ") else "ts"
-            flags.append(Flag(tok, "ц: ts/s qoidasi so'zga bog'liq, tekshiring"))
+            # O'zbek tili imlo lug'atiga ko'ra (32-34-betlar):
+            # So'z boshida (sirk, sement), so'z oxirida (kvars, shpris, abzas) va undoshdan keyin (konsert, aksiya) -> s.
+            # Faqat so'z ichida unlilar orasida/unlidan keyin (litsey, ofitser, dotsent, konstitutsiya, akatsiya) -> ts.
+            if 0 < i < n - 1 and prev in _CYR_VOWELS and prev != "ъ":
+                r = "ts"
+                flags.append(Flag(tok, "ц: ts/s qoidasi so'zga bog'liq, tekshiring"))
+            else:
+                r = "s"
+        elif lo == "ъ":
+            # Ruscha o'zlashma so'zlarda e, ё, ю, я oldidan tutuq yozilmaydi: obyekt, subyekt, syezd, inyeksiya
+            # Shuningdek lug'atga ko'ra (§32) mötadil, möjiza, mötabar kabi so'zlarda tutuq qo'yilmaydi:
+            if nxt in "еёюя" or (prev == "ў" and nxt in ("т", "ж")):
+                r = ""
+            else:
+                r = TUTUQ
+        elif lo == "ь":
+            r = ""
+        elif lo == "с" and nxt == "ҳ":
+            # s va h alohida tovushlar (Is'hoq, as'hob, mus'haf, mas'h): sh harfi bilan adashmasligi uchun tutuq bilan yoziladi
+            r = "s" + TUTUQ
         else:
             r = _CYR.get(lo)
         if r is None:
             out.append(ch)
             continue
         if ch.isupper() and r:
-            nxt = tok[i + 1] if i + 1 < len(tok) else ""
-            prv = tok[i - 1] if i > 0 else ""
-            if len(r) > 1 and (nxt.isupper() or prv.isupper()):
+            nxt_raw = tok[i + 1] if i + 1 < n else ""
+            prv_raw = tok[i - 1] if i > 0 else ""
+            if len(r) > 1 and (nxt_raw.isupper() or prv_raw.isupper()):
                 r = r.upper()
             else:
                 r = r[:1].upper() + r[1:]
@@ -204,10 +224,17 @@ def convert(text: str, exceptions: dict[str, str] | None = None, source: str = "
             if source == "latin":
                 return tok
             new = _cyr_word(tok, flags)
+            key = _norm_key(new)
+            if key in ex:
+                new = _shape(ex[key], tok)
         else:
             if source == "cyrillic":
                 return tok
             new = _latin_word(tok, ex, flags)
+        stats["words"] += 1
+        if new != tok:
+            stats["changed"] += 1
+        return new
         stats["words"] += 1
         if new != tok:
             stats["changed"] += 1
