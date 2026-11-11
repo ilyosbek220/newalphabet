@@ -28,10 +28,12 @@ def _load_dotenv(path: Path) -> None:
 _load_dotenv(BASE / ".env")
 
 TOKEN = os.getenv("BOT_TOKEN", "")
+BOT_USERNAME = os.getenv("BOT_USERNAME", "")
 ADMINS = {int(x) for x in os.getenv("ADMIN_IDS", "").replace(" ", "").split(",") if x.strip().isdigit()}
 MAX_FILE_MB = int(os.getenv("MAX_FILE_MB", "15"))
 
-db = DB(os.getenv("DB_PATH", str(BASE / "bot.db")))
+DATABASE_URL = "" if os.getenv("ALIFBO_TESTING") else os.getenv("DATABASE_URL", "").strip()
+db = DB(DATABASE_URL or os.getenv("DB_PATH", str(BASE / "bot.db")))
 
 
 def is_admin(uid: int) -> bool:
@@ -80,6 +82,9 @@ def delete_exception(old: str) -> bool:
 
 # ---------------------------------------------------------------------- tariflar
 DEFAULT_PLANS = [{"days": 30, "price": 29000}, {"days": 90, "price": 69000}, {"days": 365, "price": 199000}]
+DEFAULT_FAST_PLAN = {"days": 7, "price": 9000}
+DEFAULT_REF_COUNT = 3
+DEFAULT_REF_DAYS = 3
 
 
 def get_plans() -> list[dict]:
@@ -93,6 +98,37 @@ def get_plans() -> list[dict]:
 
 def set_plans(plans: list[dict]) -> None:
     db.set_setting("plans", json.dumps(sorted(plans, key=lambda p: p["days"])))
+
+
+def get_fast_plan_raw() -> dict:
+    raw = db.get_setting("fast_plan")
+    try:
+        p = json.loads(raw) if raw else DEFAULT_FAST_PLAN
+        return {"days": max(1, int(p["days"])), "price": max(0, int(p["price"]))}
+    except (ValueError, KeyError, TypeError):
+        return dict(DEFAULT_FAST_PLAN)
+
+
+def get_fast_plan() -> dict | None:
+    p = get_fast_plan_raw()
+    return p if p["price"] > 0 else None
+
+
+def set_fast_plan(days: int, price: int) -> None:
+    db.set_setting("fast_plan", json.dumps({"days": max(1, int(days)), "price": max(0, int(price))}))
+
+
+def ref_count() -> int:
+    return int(db.get_setting("ref_count", os.getenv("REF_COUNT", str(DEFAULT_REF_COUNT))))
+
+
+def ref_days() -> int:
+    return int(db.get_setting("ref_days", os.getenv("REF_DAYS", str(DEFAULT_REF_DAYS))))
+
+
+def set_ref_settings(count: int, days: int) -> None:
+    db.set_setting("ref_count", str(max(0, int(count))))
+    db.set_setting("ref_days", str(max(0, int(days))))
 
 
 def free_files() -> int:

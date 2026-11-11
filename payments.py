@@ -10,7 +10,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
-from config import ADMINS, card_info, db, fmt_date, fmt_dt, get_plans, money, touch
+from config import (ADMINS, card_info, db, fmt_date, fmt_dt, get_fast_plan, get_plans,
+                    money, ref_count, ref_days, touch)
 from ui import B, back_home_kb, kb, show
 
 log = logging.getLogger("alifbo-bot")
@@ -65,12 +66,16 @@ async def notify_admins(bot: Bot, pid: int) -> int:
 
 
 def plans_text(uid: int) -> str:
+    fast = get_fast_plan()
     plans = get_plans()
     lines = ["💎 Obunalar", "", "Premium bilan fayl va matn limiti yo'q, cheksiz foydalanasiz.", ""]
     if db.is_premium(uid):
         lines += [f"✅ Premium faol: {fmt_date(db.premium_until(uid))} gacha", "Yangi to'lov mavjud muddatga qo'shiladi.", ""]
+    if fast:
+        lines.append(f"⚡ Tezkor tarif: {fast['days']} kun — {money(fast['price'])} so'm")
     if plans:
         lines += [f"⭐ {p['days']} kun — {money(p['price'])} so'm" for p in plans]
+    if fast or plans:
         lines += ["", "Tarifni tanlang 👇"]
     else:
         lines.append("Hozircha tariflar kiritilmagan.")
@@ -78,8 +83,14 @@ def plans_text(uid: int) -> str:
 
 
 def plans_kb():
-    rows = [[B(text=f"⭐ {p['days']} kun — {money(p['price'])} so'm", callback_data=f"u:buy:{p['days']}")]
-            for p in get_plans()]
+    rows = []
+    fast = get_fast_plan()
+    if fast:
+        rows.append([B(text=f"⚡ Tezkor: {fast['days']} kun — {money(fast['price'])} so'm", callback_data="u:buy:fast")])
+    rows += [[B(text=f"⭐ {p['days']} kun — {money(p['price'])} so'm", callback_data=f"u:buy:{p['days']}")]
+             for p in get_plans()]
+    if ref_count() > 0 and ref_days() > 0:
+        rows.append([B(text="🎁 Do'stlarni taklif qilish (Bepul)", callback_data="u:ref")])
     rows.append([B(text="🏠 Bosh menyu", callback_data="u:home")])
     return kb(*rows)
 
@@ -99,10 +110,16 @@ async def cmd_premium(m: Message, state: FSMContext):
     await show(m, plans_text(m.from_user.id), plans_kb())
 
 
-@router.callback_query(F.data.regexp(r"^u:buy:\d+$"))
+@router.callback_query(F.data.regexp(r"^u:buy:(fast|\d+)$"))
 async def cb_buy(cb: CallbackQuery, state: FSMContext):
-    days = int(cb.data.split(":")[2])
-    plan = next((p for p in get_plans() if p["days"] == days), None)
+    key = cb.data.split(":")[2]
+    if key == "fast":
+        plan = get_fast_plan()
+        tag = " (Tezkor tarif)"
+    else:
+        days = int(key)
+        plan = next((p for p in get_plans() if p["days"] == days), None)
+        tag = ""
     if not plan:
         await cb.answer("Bu tarif endi mavjud emas", show_alert=True)
         return
@@ -112,7 +129,7 @@ async def cb_buy(cb: CallbackQuery, state: FSMContext):
     await state.set_state(PayStates.waiting_proof)
     await state.update_data(days=plan["days"], price=plan["price"])
     text = (
-        f"💳 To'lov: {plan['days']} kun — {money(plan['price'])} so'm\n\n"
+        f"💳 To'lov{tag}: {plan['days']} kun — {money(plan['price'])} so'm\n\n"
         f"{card_info()}\n\n"
         "📸 To'lovni amalga oshirgach, chekni (skrinshot) shu yerga yuboring.\n"
         "Admin tekshirib, obunani faollashtiradi."

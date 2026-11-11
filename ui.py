@@ -33,10 +33,13 @@ def kb(*rows) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[list(r) for r in rows])
 
 
-def home_kb(is_admin: bool = False) -> InlineKeyboardMarkup:
+def home_kb(is_admin: bool = False, has_ref: bool = True) -> InlineKeyboardMarkup:
+    second = [B(text="💎 Obunalar", callback_data="u:plans")]
+    if has_ref:
+        second.append(B(text="🎁 Bepul Premium", callback_data="u:ref"))
     rows = [
         [B(text="📖 Qoidalar", callback_data="u:rules"), B(text="📊 Limitim", callback_data="u:me")],
-        [B(text="💎 Obunalar", callback_data="u:plans")],
+        second,
     ]
     if is_admin:   # faqat adminga ko'rinadi
         rows.append([B(text="🛠 Admin panel", callback_data="adm:home")])

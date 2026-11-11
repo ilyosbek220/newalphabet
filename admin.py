@@ -14,7 +14,8 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
 from config import (ADMINS, EXCEPTIONS, add_exception, card_info, db, delete_exception, fmt_date, fmt_dt,
-                    free_chars, free_files, get_plans, money, set_plans)
+                    free_chars, free_files, get_fast_plan, get_fast_plan_raw, get_plans, money,
+                    ref_count, ref_days, set_fast_plan, set_plans, set_ref_settings)
 from payments import STATUS, decide_kb, notify_user, pay_caption, send_proof, who
 from ui import B, NOT_CMD, back_home_kb, edit_any, kb, show
 
@@ -33,6 +34,8 @@ class A(StatesGroup):
     word_del = State()
     card = State()
     plan = State()
+    fast_plan = State()
+    ref_cfg = State()
     ff = State()
     fc = State()
 
@@ -76,11 +79,13 @@ async def cb_cancel(cb: CallbackQuery, state: FSMContext):
 # -------------------------------------------------------------------- statistika
 def stats_text() -> str:
     s = db.stats()
+    baza = "PostgreSQL (doimiy)" if db.is_postgres else "SQLite (lokal)"
     return ("📊 Statistika\n\n"
-            f"👥 Foydalanuvchilar: {s['users']}\n💎 Faol premium: {s['premium']}\n🚫 Bloklangan: {s['banned']}\n"
+            f"👥 Foydalanuvchilar: {s['users']} (🤝 referal: {s['referred']})\n💎 Faol premium: {s['premium']}\n🚫 Bloklangan: {s['banned']}\n"
             f"📁 Bugun: {s['files_today']} fayl, {s['chars_today']} belgi\n"
             f"💳 Kutilayotgan to'lovlar: {s['pending']}\n"
-            f"💰 Daromad: 30 kunda {money(s['income_30d'])} so'm, jami {money(s['income_total'])} so'm")
+            f"💰 Daromad: 30 kunda {money(s['income_30d'])} so'm, jami {money(s['income_total'])} so'm\n"
+            f"🗄 Baza: {baza}")
 
 
 @router.message(Command("stats"))
@@ -157,7 +162,8 @@ def user_card(u: dict) -> str:
     uname = f" @{u['username']}" if u["username"] else ""
     banned = "ha" if u["banned"] else "yo'q"
     return (f"👤 {u['full_name'] or '—'}{uname}\n🆔 {u['id']}\n📅 Qo'shilgan: {fmt_date(u['joined'])}\n"
-            f"💎 Premium: {prem}\n📊 Bugun: {files} fayl, {chars} belgi\n🚫 Bloklangan: {banned}"
+            f"💎 Premium: {prem}\n📊 Bugun: {files} fayl, {chars} belgi\n"
+            f"🤝 Taklif qilganlar: {u.get('ref_total', 0)} ta\n🚫 Bloklangan: {banned}"
             + ("\n📴 Botni to'xtatgan" if u["blocked"] else ""))
 
 
@@ -428,16 +434,22 @@ async def got_word_del(m: Message, state: FSMContext):
 
 # ------------------------------------------------------------------- sozlamalar
 def settings_text() -> str:
+    fast = get_fast_plan()
+    fast_line = f"⚡ Tezkor tarif: {fast['days']} kun — {money(fast['price'])} so'm" if fast else "⚡ Tezkor tarif: o'chirilgan"
+    rc, rd = ref_count(), ref_days()
+    ref_line = f"🎁 Referal: {rc} ta do'st → {rd} kun Premium" if (rc > 0 and rd > 0) else "🎁 Referal: o'chirilgan"
     plans = "\n".join(f"   ⭐ {p['days']} kun — {money(p['price'])} so'm" for p in get_plans()) or "   (yo'q)"
     card = card_info()
     return ("⚙️ Sozlamalar\n\n"
-            f"📁 Bepul fayl limiti: {free_files()} ta/kun\n🔤 Bepul matn limiti: {free_chars()} belgi/kun\n\n"
+            f"📁 Bepul fayl limiti: {free_files()} ta/kun\n🔤 Bepul matn limiti: {free_chars()} belgi/kun\n"
+            f"{fast_line}\n{ref_line}\n\n"
             f"💰 Tariflar:\n{plans}\n\n💳 To'lov matni:\n{card[:300]}")
 
 
 def settings_kb():
     return kb(
         [B(text="💳 To'lov matni", callback_data="adm:set:card"), B(text="💰 Tariflar", callback_data="adm:set:plan")],
+        [B(text="⚡ Tezkor tarif", callback_data="adm:set:fast"), B(text="🎁 Referal", callback_data="adm:set:ref")],
         [B(text="📁 Fayl limiti", callback_data="adm:set:ff"), B(text="🔤 Matn limiti", callback_data="adm:set:fc")],
         [B(text="🔙 Admin panel", callback_data="adm:home")],
     )
@@ -458,9 +470,29 @@ PROMPTS = {
 }
 
 
-@router.callback_query(F.data.regexp(r"^adm:set:(card|plan|ff|fc)$"))
+def _dynamic_prompt(key: str):
+    if key == "fast":
+        fp = get_fast_plan_raw()
+        status = f"{fp['days']} kun — {money(fp['price'])} so'm" if fp["price"] > 0 else f"{fp['days']} kun — o'chirilgan"
+        return (A.fast_plan,
+                f"⚡ Tezkor tarif sozlamasi\nHozirgi: {status}\n\n"
+                "O'zingiz xohlagan narxni yuboring (masalan: 7000)\n"
+                "yoki \"kun narx\" ko'rinishida yozing (masalan: 3 5000).\n"
+                "O'chirish uchun 0 yuboring.")
+    if key == "ref":
+        rc, rd = ref_count(), ref_days()
+        status = f"{rc} ta do'st → {rd} kun Premium" if (rc > 0 and rd > 0) else "o'chirilgan"
+        return (A.ref_cfg,
+                f"🎁 Referal sozlamasi\nHozirgi: {status}\n\n"
+                "Format: \"do'stlar_soni kun\" ko'rinishida yuboring.\n"
+                "Masalan: 3 5  (3 ta do'st taklif qilsa — 5 kun Premium beriladi)\n\n"
+                "Referalni o'chirish uchun: 0 0 yuboring.")
+    return PROMPTS[key]
+
+
+@router.callback_query(F.data.regexp(r"^adm:set:(card|plan|fast|ref|ff|fc)$"))
 async def cb_set_prompt(cb: CallbackQuery, state: FSMContext):
-    st, prompt = PROMPTS[cb.data.split(":")[2]]
+    st, prompt = _dynamic_prompt(cb.data.split(":")[2])
     await state.set_state(st)
     await show(cb, prompt, CANCEL)
 
@@ -492,6 +524,37 @@ async def got_plan(m: Message, state: FSMContext):
         plans.append({"days": days, "price": price})
     set_plans(plans)
     await _saved(m, state, "Tarif o'chirildi" if price == 0 else "Tarif saqlandi")
+
+
+@router.message(A.fast_plan, NOT_CMD)
+async def got_fast_plan(m: Message, state: FSMContext):
+    parts = (m.text or "").split()
+    cur = get_fast_plan_raw()
+    if len(parts) == 1 and parts[0].isdigit() and int(parts[0]) <= 100_000_000:
+        days, price = cur["days"], int(parts[0])
+    elif (len(parts) == 2 and all(p.isdigit() for p in parts)
+          and 1 <= int(parts[0]) <= 3650 and int(parts[1]) <= 100_000_000):
+        days, price = int(parts[0]), int(parts[1])
+    else:
+        await m.answer("❗ Narx (masalan: 7000) yoki \"kun narx\" (masalan: 3 5000) yuboring.", reply_markup=CANCEL)
+        return
+    set_fast_plan(days, price)
+    await _saved(m, state, "Tezkor tarif o'chirildi" if price == 0 else f"Tezkor tarif saqlandi: {days} kun — {money(price)} so'm")
+
+
+@router.message(A.ref_cfg, NOT_CMD)
+async def got_ref_cfg(m: Message, state: FSMContext):
+    parts = (m.text or "").split()
+    if len(parts) != 2 or not all(p.isdigit() for p in parts):
+        await m.answer("❗ Format: do'stlar_soni kun. Masalan: 3 5 (o'chirish uchun: 0 0)", reply_markup=CANCEL)
+        return
+    cnt, days = int(parts[0]), int(parts[1])
+    if (cnt == 0 and days == 0) or (1 <= cnt <= 1000 and 1 <= days <= 3650):
+        set_ref_settings(cnt, days)
+        note = "Referal tizimi o'chirildi" if cnt == 0 else f"Referal saqlandi: {cnt} ta do'st → {days} kun"
+        await _saved(m, state, note)
+        return
+    await m.answer("❗ Limit 1–1000, kun 1–3650 oralig'ida bo'lsin (yoki 0 0).", reply_markup=CANCEL)
 
 
 @router.message(A.ff, NOT_CMD)

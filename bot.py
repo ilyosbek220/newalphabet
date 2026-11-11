@@ -7,15 +7,18 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
+from urllib.parse import quote
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (BotCommand, BotCommandScopeChat, CallbackQuery, FSInputFile, Message)
 
 import admin
+import config
 import payments
-from config import (EXCEPTIONS, MAX_FILE_MB, TOKEN, ADMINS, db, fmt_date, free_chars, free_files, is_admin, touch)
+from config import (ADMINS, EXCEPTIONS, MAX_FILE_MB, TOKEN, db, fmt_date, free_chars, free_files,
+                    get_fast_plan, is_admin, money, ref_count, ref_days, touch)
 from officeconv import SUPPORTED, UnsupportedFile, convert_file
 from uzconv import convert, detect_script
 from ui import (B, RULES_TEXT, START_TEXT, SUPPORTED_TEXT, back_home_kb, home_kb, kb, show)
@@ -23,11 +26,48 @@ from ui import (B, RULES_TEXT, START_TEXT, SUPPORTED_TEXT, back_home_kb, home_kb
 log = logging.getLogger("alifbo-bot")
 router = Router(name="user")
 SEM = asyncio.Semaphore(3)  # bir vaqtda ko'pi bilan 3 ta fayl ishlanadi
+PREVIEW_MAX_BYTES = 5 * 1024 * 1024
 
 PLANS_BTN = [B(text="💎 Obunalar", callback_data="u:plans")]
 
 
 # ---------------------------------------------------------------------- yordamchi
+def _ref_enabled() -> bool:
+    return ref_count() > 0 and ref_days() > 0
+
+
+def _home_kb(uid: int):
+    return home_kb(is_admin(uid), has_ref=_ref_enabled())
+
+
+def _limit_kb():
+    rows = []
+    fast = get_fast_plan()
+    if fast:
+        rows.append([B(text=f"⚡ Tezkor tarif: {fast['days']} kun — {money(fast['price'])} so'm", callback_data="u:buy:fast")])
+    rows.append(PLANS_BTN)
+    if _ref_enabled():
+        rows.append([B(text="🎁 Do'stlarni taklif qilish (Bepul)", callback_data="u:ref")])
+    return kb(*rows)
+
+
+def _limit_preview_text(
+    header: str, analysis_title: str, subject_noun: str, preview: tuple[int, int] | None, cta: str
+) -> str:
+    lines = [header]
+    if preview is not None:
+        changed, flagged = preview
+        lines.extend(["", f"📊 {analysis_title}:"])
+        lines.append(
+            f"• {changed} ta so'z to'liq o'girishga tayyor" if changed > 0
+            else f"• {subject_noun} tekshiruvga tayyor"
+        )
+        if flagged > 0:
+            lines.append(f"• {flagged} ta bahsli/imloviy so'z aniqlandi")
+    lines.extend(["", f"🔓 {cta} 👇"])
+    return "\n".join(lines)
+
+
 def _chunks(text: str, size: int = 4000):
     while text:
         if len(text) <= size:
@@ -50,11 +90,19 @@ def _flags_line(flags, limit: int = 8) -> str:
 def me_text(uid: int) -> str:
     files, chars = db.usage_today(uid)
     if db.is_premium(uid):
-        return (f"📊 Limitim\n\n💎 Premium faol: {fmt_date(db.premium_until(uid))} gacha\n"
+        text = (f"📊 Limitim\n\n💎 Premium faol: {fmt_date(db.premium_until(uid))} gacha\n"
                 f"♾ Cheklov yo'q\n\nBugun: 📁 {files} fayl, 🔤 {chars} belgi")
-    return (f"📊 Limitim\n\n💎 Premium: yo'q\n\nBugungi bepul limit:\n"
-            f"📁 Fayllar: {files}/{free_files()}\n🔤 Matn: {chars}/{free_chars()} belgi\n\n"
-            "Cheksiz foydalanish uchun obuna oling 👇")
+    else:
+        text = (f"📊 Limitim\n\n💎 Premium: yo'q\n\nBugungi bepul limit:\n"
+                f"📁 Fayllar: {files}/{free_files()}\n🔤 Matn: {chars}/{free_chars()} belgi")
+    if _ref_enabled():
+        u = db.get_user(uid)
+        prog = int(u["ref_progress"] or 0) if u else 0
+        total = int(u["ref_total"] or 0) if u else 0
+        text += f"\n\n🎁 Takliflar: {prog}/{ref_count()} (Jami: {total} ta) — /ref"
+    if not db.is_premium(uid):
+        text += "\n\nCheksiz foydalanish uchun obuna oling 👇"
+    return text
 
 
 def me_kb(uid: int):
@@ -62,24 +110,108 @@ def me_kb(uid: int):
     return back_home_kb(None if db.is_premium(uid) else PLANS_BTN)
 
 
+async def _bot_username(bot: Bot) -> str:
+    if config.BOT_USERNAME:
+        return config.BOT_USERNAME
+    try:
+        me = await bot.get_me()
+        username = getattr(me, "username", None) or ""
+        if username:
+            config.BOT_USERNAME = username
+        return username
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+async def _ref_screen(uid: int, bot: Bot):
+    if not _ref_enabled():
+        return (
+            "🎁 Referal dasturi\n\nHozircha referal dasturi vaqtincha o'chirilgan.",
+            back_home_kb(None),
+        )
+    rc, rd = ref_count(), ref_days()
+    u = db.get_user(uid)
+    prog = int(u["ref_progress"] or 0) if u else 0
+    total = int(u["ref_total"] or 0) if u else 0
+    left = max(1, rc - prog)
+    username = await _bot_username(bot)
+    link = f"https://t.me/{username}?start=ref_{uid}" if username else f"/start ref_{uid}"
+    text = (
+        "🎁 Bepul Premium — Do'stlarni taklif qiling!\n\n"
+        f"Har {rc} ta yangi do'stingiz botga kirsa, sizga avtomatik "
+        f"{rd} kunlik BEPUL Premium beriladi!\n\n"
+        "📊 Natijangiz:\n"
+        f"• Joriy bosqich: {prog}/{rc} ta do'st (yana {left} ta qoldi)\n"
+        f"• Jami taklif qilganlar: {total} ta\n\n"
+        f"🔗 Shaxsiy havolangiz:\n{link}\n\n"
+        "💡 Faqat botga birinchi marta kirgan foydalanuvchilar hisoblanadi."
+    )
+    rows = []
+    if username:
+        share_msg = quote("Lotin <-> Yangi o'zbek alifbosi konvertori va Word/Excel/PDF bot! Kiring:")
+        share_url = f"https://t.me/share/url?url={quote(link)}&text={share_msg}"
+        rows.append([B(text="📤 Do'stlarga ulashish", url=share_url)])
+    rows.append(PLANS_BTN)
+    rows.append([B(text="🏠 Bosh menyu", callback_data="u:home")])
+    return text, kb(*rows)
+
+
 # ------------------------------------------------------------------------ menyu
 @router.message(CommandStart())
-async def cmd_start(m: Message, state: FSMContext):
+async def cmd_start(m: Message, command: CommandObject, state: FSMContext, bot: Bot):
     await state.clear()
+    ref_award = None
+    arg = (command.args or "").strip() if command else ""
+    if arg.startswith("ref_") and _ref_enabled():
+        raw_ref = arg[4:]
+        if raw_ref.isdigit():
+            ref_award = db.register_referral(m.from_user.id, int(raw_ref), ref_count(), ref_days())
     touch(m.from_user)
-    await m.answer(START_TEXT, reply_markup=home_kb(is_admin(m.from_user.id)))
+    await m.answer(START_TEXT, reply_markup=_home_kb(m.from_user.id))
+    if ref_award:
+        ref_uid = ref_award["ref_uid"]
+        prog, need = ref_award["progress"], ref_award["need"]
+        if ref_award["awarded_days"] > 0:
+            note = (
+                f"🎉 Tabriklaymiz! Yangi do'stingiz sizning havolangiz orqali qo'shildi "
+                f"({need}/{need}).\n\n"
+                f"🎁 Sizga {ref_award['awarded_days']} kunlik BEPUL Premium berildi!\n"
+                f"📅 Amal qilish muddati: {fmt_date(ref_award['premium_until'])} gacha."
+            )
+        else:
+            note = (
+                f"🤝 Yangi do'stingiz sizning havolangiz orqali qo'shildi!\n"
+                f"📊 Jarayon: {prog}/{need} (yana {max(1, need - prog)} ta qoldi)."
+            )
+        await payments.notify_user(bot, ref_uid, note)
 
 
 @router.message(Command("help"))
 async def cmd_help(m: Message, state: FSMContext):
-    await cmd_start(m, state)
+    await state.clear()
+    touch(m.from_user)
+    await m.answer(START_TEXT, reply_markup=_home_kb(m.from_user.id))
 
 
 @router.callback_query(F.data == "u:home")
 async def cb_home(cb: CallbackQuery, state: FSMContext):
     await state.clear()
     touch(cb.from_user)
-    await show(cb, START_TEXT, home_kb(is_admin(cb.from_user.id)))
+    await show(cb, START_TEXT, _home_kb(cb.from_user.id))
+
+
+@router.message(Command("ref"))
+async def cmd_ref(m: Message, bot: Bot):
+    touch(m.from_user)
+    text, markup = await _ref_screen(m.from_user.id, bot)
+    await m.answer(text, reply_markup=markup)
+
+
+@router.callback_query(F.data == "u:ref")
+async def cb_ref(cb: CallbackQuery, bot: Bot):
+    touch(cb.from_user)
+    text, markup = await _ref_screen(cb.from_user.id, bot)
+    await show(cb, text, markup)
 
 
 @router.callback_query(F.data == "u:rules")
@@ -114,8 +246,19 @@ async def cb_not_admin(cb: CallbackQuery):
 async def on_text(m: Message):
     uid, text = m.from_user.id, m.text
     touch(m.from_user)
-    if not db.is_premium(uid) and db.usage_today(uid)[1] + len(text) > free_chars():
-        await m.answer(f"⛔ Bugungi bepul matn limiti tugadi ({free_chars()} belgi).", reply_markup=kb(PLANS_BTN))
+    used = db.usage_today(uid)[1]
+    limit = free_chars()
+    if not db.is_premium(uid) and used + len(text) > limit:
+        res = convert(text, EXCEPTIONS)
+        flagged = len(dict.fromkeys(f.word for f in res.flags))
+        msg = _limit_preview_text(
+            f"⛔ Bugungi bepul matn limiti tugadi ({used}/{limit} belgi).",
+            f"Yuborilgan matn tahlili ({len(text)} belgi)",
+            "Matn",
+            (res.stats["changed"], flagged),
+            "Hozirgi matnni to'liq olish va cheksiz foydalanish uchun quyidagilardan birini tanlang",
+        )
+        await m.answer(msg, reply_markup=_limit_kb())
         return
     res = convert(text, EXCEPTIONS)
     if res.stats["changed"] == 0:
@@ -132,6 +275,27 @@ async def on_text(m: Message):
 
 
 # ------------------------------------------------------------------------ fayl
+async def _preview_doc(bot: Bot, doc) -> tuple[int, int] | None:
+    if doc.file_size and doc.file_size > PREVIEW_MAX_BYTES:
+        return None
+    tmp = Path(tempfile.mkdtemp(prefix="alifbo_"))
+    try:
+        out_dir = tmp / "out"
+        out_dir.mkdir()
+        src = tmp / Path(doc.file_name or "fayl").name
+        await bot.download(doc, destination=src)
+        async with SEM:
+            _dst, rep = await asyncio.wait_for(
+                asyncio.to_thread(convert_file, src, out_dir, EXCEPTIONS), timeout=30
+            )
+        flagged = len(dict.fromkeys(f.word for f in rep.flags))
+        return rep.changed, flagged
+    except Exception:  # noqa: BLE001
+        return None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 @router.message(F.document)
 async def on_document(m: Message, bot: Bot):
     uid, doc = m.from_user.id, m.document
@@ -145,7 +309,15 @@ async def on_document(m: Message, bot: Bot):
         await m.answer(f"⚠️ Fayl juda katta (ko'pi bilan {MAX_FILE_MB} MB).")
         return
     if not db.is_premium(uid) and db.usage_today(uid)[0] >= free_files():
-        await m.answer(f"⛔ Bugungi bepul fayl limiti tugadi ({free_files()} ta).", reply_markup=kb(PLANS_BTN))
+        preview = await _preview_doc(bot, doc)
+        msg = _limit_preview_text(
+            f"⛔ Bugungi bepul fayl limiti tugadi ({free_files()} ta).",
+            f"«{name}» fayli tahlili",
+            "Fayl",
+            preview,
+            "Tayyor faylni olish va cheksiz konvertatsiya uchun quyidagilardan birini tanlang",
+        )
+        await m.answer(msg, reply_markup=_limit_kb())
         return
 
     status = await m.answer("⏳ Fayl ishlanmoqda...")
@@ -217,6 +389,7 @@ PUBLIC_COMMANDS = [
     BotCommand(command="rules", description="📖 Qoidalar"),
     BotCommand(command="me", description="📊 Limitim"),
     BotCommand(command="premium", description="💎 Obunalar"),
+    BotCommand(command="ref", description="🎁 Bepul Premium (Taklif)"),
 ]
 # Faqat adminning o'z chatida ko'rinadi
 ADMIN_COMMANDS = PUBLIC_COMMANDS + [
@@ -264,19 +437,21 @@ async def main() -> None:
             "BOT_TOKEN=123456:ABC...   (tirnoqsiz, probelsiz)"
         )
     bot = Bot(TOKEN)
+    await _bot_username(bot)
     await bot.set_my_commands(PUBLIC_COMMANDS)
     for admin_id in ADMINS:
         try:
             await bot.set_my_commands(ADMIN_COMMANDS, scope=BotCommandScopeChat(chat_id=admin_id))
         except Exception as e:  # noqa: BLE001 - admin botni hali boshlamagan bo'lishi mumkin
             log.warning("admin %s uchun buyruqlar o'rnatilmadi (avval botga /start yozing)", admin_id)
-    log.info("Bot ishga tushdi")
+    log.info("Bot ishga tushdi (baza: %s)", db.backend)
     runner = await _start_health_server()
     try:
         await build_dispatcher().start_polling(bot)
     finally:
         if runner:
             await runner.cleanup()
+        db.close()
 
 
 if __name__ == "__main__":
