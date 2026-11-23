@@ -18,7 +18,8 @@ import admin
 import config
 import payments
 from config import (ADMINS, EXCEPTIONS, MAX_FILE_MB, TOKEN, db, fmt_date, free_chars, free_files,
-                    get_fast_plan, is_admin, money, ref_count, ref_days, touch)
+                    get_fast_plan, is_admin, is_trial_mode, money, ref_count, ref_days,
+                    touch, trial_chars, trial_files)
 from officeconv import SUPPORTED, UnsupportedFile, convert_file
 from uzconv import convert, detect_script
 from ui import (B, RULES_TEXT, START_TEXT, SUPPORTED_TEXT, back_home_kb, home_kb, kb, show)
@@ -88,13 +89,20 @@ def _flags_line(flags, limit: int = 8) -> str:
 
 
 def me_text(uid: int) -> str:
-    files, chars = db.usage_today(uid)
+    files_today, chars_today = db.usage_today(uid)
+    files_total, chars_total = db.usage_total(uid)
     if db.is_premium(uid):
         text = (f"📊 Limitim\n\n💎 Premium faol: {fmt_date(db.premium_until(uid))} gacha\n"
-                f"♾ Cheklov yo'q\n\nBugun: 📁 {files} fayl, 🔤 {chars} belgi")
+                f"♾ Cheklov yo'q\n\nBugun: 📁 {files_today} fayl, 🔤 {chars_today} belgi")
     else:
-        text = (f"📊 Limitim\n\n💎 Premium: yo'q\n\nBugungi bepul limit:\n"
-                f"📁 Fayllar: {files}/{free_files()}\n🔤 Matn: {chars}/{free_chars()} belgi")
+        if is_trial_mode():
+            text = (f"📊 Limitim\n\n💎 Premium: yo'q\n\n"
+                    f"🎁 Bepul sinov limiti (bir martalik):\n"
+                    f"📁 Fayllar: {files_total}/{trial_files()}\n🔤 Matn: {chars_total}/{trial_chars()} belgi")
+        else:
+            text = (f"📊 Limitim\n\n💎 Premium: yo'q\n\n"
+                    f"Bugungi bepul limit:\n"
+                    f"📁 Fayllar: {files_today}/{free_files()}\n🔤 Matn: {chars_today}/{free_chars()} belgi")
     if _ref_enabled():
         u = db.get_user(uid)
         prog = int(u["ref_progress"] or 0) if u else 0
@@ -246,20 +254,28 @@ async def cb_not_admin(cb: CallbackQuery):
 async def on_text(m: Message):
     uid, text = m.from_user.id, m.text
     touch(m.from_user)
-    used = db.usage_today(uid)[1]
-    limit = free_chars()
-    if not db.is_premium(uid) and used + len(text) > limit:
-        res = convert(text, EXCEPTIONS)
-        flagged = len(dict.fromkeys(f.word for f in res.flags))
-        msg = _limit_preview_text(
-            f"⛔ Bugungi bepul matn limiti tugadi ({used}/{limit} belgi).",
-            f"Yuborilgan matn tahlili ({len(text)} belgi)",
-            "Matn",
-            (res.stats["changed"], flagged),
-            "Hozirgi matnni to'liq olish va cheksiz foydalanish uchun quyidagilardan birini tanlang",
-        )
-        await m.answer(msg, reply_markup=_limit_kb())
-        return
+    if not db.is_premium(uid):
+        if is_trial_mode():
+            used = db.usage_total(uid)[1]
+            limit = trial_chars()
+            header = f"⛔ Bepul sinov limiti tugadi ({used}/{limit} belgi).\nEndi botdan foydalanish uchun obuna olishingiz kerak."
+        else:
+            used = db.usage_today(uid)[1]
+            limit = free_chars()
+            header = f"⛔ Bugungi bepul matn limiti tugadi ({used}/{limit} belgi)."
+
+        if used + len(text) > limit:
+            res = convert(text, EXCEPTIONS)
+            flagged = len(dict.fromkeys(f.word for f in res.flags))
+            msg = _limit_preview_text(
+                header,
+                f"Yuborilgan matn tahlili ({len(text)} belgi)",
+                "Matn",
+                (res.stats["changed"], flagged),
+                "Hozirgi matnni to'liq olish va cheksiz foydalanish uchun quyidagilardan birini tanlang",
+            )
+            await m.answer(msg, reply_markup=_limit_kb())
+            return
     res = convert(text, EXCEPTIONS)
     if res.stats["changed"] == 0:
         hint = ("✅ Matn allaqachon yangi alifboda ko'rinadi." if detect_script(text) == "new"
@@ -308,17 +324,29 @@ async def on_document(m: Message, bot: Bot):
     if doc.file_size and doc.file_size > MAX_FILE_MB * 1024 * 1024:
         await m.answer(f"⚠️ Fayl juda katta (ko'pi bilan {MAX_FILE_MB} MB).")
         return
-    if not db.is_premium(uid) and db.usage_today(uid)[0] >= free_files():
-        preview = await _preview_doc(bot, doc)
-        msg = _limit_preview_text(
-            f"⛔ Bugungi bepul fayl limiti tugadi ({free_files()} ta).",
-            f"«{name}» fayli tahlili",
-            "Fayl",
-            preview,
-            "Tayyor faylni olish va cheksiz konvertatsiya uchun quyidagilardan birini tanlang",
-        )
-        await m.answer(msg, reply_markup=_limit_kb())
-        return
+    if not db.is_premium(uid):
+        if is_trial_mode():
+            used_f = db.usage_total(uid)[0]
+            limit_f = trial_files()
+            is_over = used_f >= limit_f
+            header = f"⛔ Bepul sinov fayl limiti tugadi ({limit_f} ta).\nEndi botdan foydalanish uchun obuna olishingiz kerak."
+        else:
+            used_f = db.usage_today(uid)[0]
+            limit_f = free_files()
+            is_over = used_f >= limit_f
+            header = f"⛔ Bugungi bepul fayl limiti tugadi ({limit_f} ta)."
+
+        if is_over:
+            preview = await _preview_doc(bot, doc)
+            msg = _limit_preview_text(
+                header,
+                f"«{name}» fayli tahlili",
+                "Fayl",
+                preview,
+                "Tayyor faylni olish va cheksiz konvertatsiya uchun quyidagilardan birini tanlang",
+            )
+            await m.answer(msg, reply_markup=_limit_kb())
+            return
 
     status = await m.answer("⏳ Fayl ishlanmoqda...")
     tmp = Path(tempfile.mkdtemp(prefix="alifbo_"))

@@ -322,6 +322,15 @@ class DB:
 
         return self._run(op)
 
+    def usage_total(self, uid: int) -> tuple[int, int]:
+        def op(c):
+            row = self._exec(
+                c, "SELECT COALESCE(SUM(files),0) AS f, COALESCE(SUM(chars),0) AS c FROM usage WHERE user_id=?", (uid,)
+            ).fetchone()
+            return (int(row["f"]), int(row["c"])) if row else (0, 0)
+
+        return self._run(op)
+
     def add_usage(self, uid: int, files: int = 0, chars: int = 0) -> None:
         today = self._today()
         self._run(

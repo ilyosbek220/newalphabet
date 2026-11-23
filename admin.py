@@ -14,8 +14,10 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
 from config import (ADMINS, EXCEPTIONS, add_exception, card_info, db, delete_exception, fmt_date, fmt_dt,
-                    free_chars, free_files, get_fast_plan, get_fast_plan_raw, get_plans, money,
-                    ref_count, ref_days, set_fast_plan, set_plans, set_ref_settings)
+                    free_chars, free_files, get_fast_plan, get_fast_plan_raw, get_plans,
+                    is_trial_mode, limit_mode, money, ref_count, ref_days, set_fast_plan,
+                    set_limit_mode, set_plans, set_ref_settings, set_trial_chars,
+                    set_trial_files, trial_chars, trial_files)
 from payments import STATUS, decide_kb, notify_user, pay_caption, send_proof, who
 from ui import B, NOT_CMD, back_home_kb, edit_any, kb, show
 
@@ -38,6 +40,8 @@ class A(StatesGroup):
     ref_cfg = State()
     ff = State()
     fc = State()
+    tf = State()
+    tc = State()
 
 
 CANCEL = kb([B(text="❌ Bekor qilish", callback_data="adm:cancel")])
@@ -158,11 +162,14 @@ async def cb_decide(cb: CallbackQuery, bot: Bot):
 # ------------------------------------------------------------------ foydalanuvchi
 def user_card(u: dict) -> str:
     files, chars = db.usage_today(u["id"])
+    files_tot, chars_tot = db.usage_total(u["id"])
     prem = f"{fmt_date(u['premium_until'])} gacha" if u["premium_until"] > time.time() else "yo'q"
     uname = f" @{u['username']}" if u["username"] else ""
     banned = "ha" if u["banned"] else "yo'q"
     return (f"👤 {u['full_name'] or '—'}{uname}\n🆔 {u['id']}\n📅 Qo'shilgan: {fmt_date(u['joined'])}\n"
-            f"💎 Premium: {prem}\n📊 Bugun: {files} fayl, {chars} belgi\n"
+            f"💎 Premium: {prem}\n"
+            f"📊 Bugun: {files} fayl, {chars} belgi\n"
+            f"📈 Jami: {files_tot} fayl, {chars_tot} belgi\n"
             f"🤝 Taklif qilganlar: {u.get('ref_total', 0)} ta\n🚫 Bloklangan: {banned}"
             + ("\n📴 Botni to'xtatgan" if u["blocked"] else ""))
 
@@ -440,17 +447,23 @@ def settings_text() -> str:
     ref_line = f"🎁 Referal: {rc} ta do'st → {rd} kun Premium" if (rc > 0 and rd > 0) else "🎁 Referal: o'chirilgan"
     plans = "\n".join(f"   ⭐ {p['days']} kun — {money(p['price'])} so'm" for p in get_plans()) or "   (yo'q)"
     card = card_info()
+    mode_str = "🎁 Bir martalik sinov (yangi)" if is_trial_mode() else "📅 Kunlik limit (eski)"
     return ("⚙️ Sozlamalar\n\n"
-            f"📁 Bepul fayl limiti: {free_files()} ta/kun\n🔤 Bepul matn limiti: {free_chars()} belgi/kun\n"
+            f"🔄 Limit rejimi: {mode_str}\n"
+            f"• Bir martalik sinov: 📁 {trial_files()} fayl, 🔤 {trial_chars()} belgi\n"
+            f"• Kunlik limit: 📁 {free_files()} ta/kun, 🔤 {free_chars()} belgi/kun\n\n"
             f"{fast_line}\n{ref_line}\n\n"
             f"💰 Tariflar:\n{plans}\n\n💳 To'lov matni:\n{card[:300]}")
 
 
 def settings_kb():
+    mode_btn_text = "🔄 Rejim: 🟢 Bir martalik (YANGI)" if is_trial_mode() else "🔄 Rejim: 🔵 Kunlik (ESKI)"
     return kb(
-        [B(text="💳 To'lov matni", callback_data="adm:set:card"), B(text="💰 Tariflar", callback_data="adm:set:plan")],
+        [B(text=mode_btn_text, callback_data="adm:toggle:mode")],
+        [B(text="📁 Sinov fayl", callback_data="adm:set:tf"), B(text="🔤 Sinov matn", callback_data="adm:set:tc")],
+        [B(text="📁 Kunlik fayl", callback_data="adm:set:ff"), B(text="🔤 Kunlik matn", callback_data="adm:set:fc")],
         [B(text="⚡ Tezkor tarif", callback_data="adm:set:fast"), B(text="🎁 Referal", callback_data="adm:set:ref")],
-        [B(text="📁 Fayl limiti", callback_data="adm:set:ff"), B(text="🔤 Matn limiti", callback_data="adm:set:fc")],
+        [B(text="💳 To'lov matni", callback_data="adm:set:card"), B(text="💰 Tariflar", callback_data="adm:set:plan")],
         [B(text="🔙 Admin panel", callback_data="adm:home")],
     )
 
@@ -461,12 +474,24 @@ async def cb_set(cb: CallbackQuery, state: FSMContext):
     await show(cb, settings_text(), settings_kb())
 
 
+@router.callback_query(F.data == "adm:toggle:mode")
+async def cb_toggle_mode(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    new_mode = "daily" if is_trial_mode() else "trial"
+    set_limit_mode(new_mode)
+    label = "Bir martalik sinov (yangi)" if new_mode == "trial" else "Kunlik limit (eski)"
+    await cb.answer(f"Limit rejimi o'zgartirildi: {label}", show_alert=True)
+    await show(cb, settings_text(), settings_kb())
+
+
 PROMPTS = {
     "card": (A.card, "💳 Mijozlarga ko'rsatiladigan to'lov matnini yuboring (karta raqami, ism, izoh):"),
     "plan": (A.plan, "💰 Tarifni \"kun narx\" ko'rinishida yuboring.\nMasalan: 30 29000\n"
                      "Mavjud tarif yangilanadi, yangisi qo'shiladi. O'chirish uchun narxni 0 yozing (30 0)."),
     "ff": (A.ff, "📁 Kunlik bepul fayl limitini (son) yuboring:"),
     "fc": (A.fc, "🔤 Kunlik bepul belgi limitini (son) yuboring:"),
+    "tf": (A.tf, "📁 Bir martalik bepul sinov fayl limitini (son) yuboring:"),
+    "tc": (A.tc, "🔤 Bir martalik bepul sinov belgi limitini (son) yuboring (masalan: 500):"),
 }
 
 
@@ -490,7 +515,7 @@ def _dynamic_prompt(key: str):
     return PROMPTS[key]
 
 
-@router.callback_query(F.data.regexp(r"^adm:set:(card|plan|fast|ref|ff|fc)$"))
+@router.callback_query(F.data.regexp(r"^adm:set:(card|plan|fast|ref|ff|fc|tf|tc)$"))
 async def cb_set_prompt(cb: CallbackQuery, state: FSMContext):
     st, prompt = _dynamic_prompt(cb.data.split(":")[2])
     await state.set_state(st)
@@ -573,3 +598,21 @@ async def got_fc(m: Message, state: FSMContext):
         return
     db.set_setting("free_chars", str(int(m.text)))
     await _saved(m, state, "Matn limiti saqlandi")
+
+
+@router.message(A.tf, NOT_CMD)
+async def got_tf(m: Message, state: FSMContext):
+    if not (m.text or "").strip().isdigit() or int(m.text) > 1000:
+        await m.answer("❗ 0 dan 1000 gacha son yuboring.", reply_markup=CANCEL)
+        return
+    set_trial_files(int(m.text))
+    await _saved(m, state, "Bir martalik sinov fayl limiti saqlandi")
+
+
+@router.message(A.tc, NOT_CMD)
+async def got_tc(m: Message, state: FSMContext):
+    if not (m.text or "").strip().isdigit() or int(m.text) > 10_000_000:
+        await m.answer("❗ Butun son yuboring.", reply_markup=CANCEL)
+        return
+    set_trial_chars(int(m.text))
+    await _saved(m, state, "Bir martalik sinov matn limiti saqlandi")

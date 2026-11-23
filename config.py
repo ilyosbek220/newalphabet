@@ -85,6 +85,9 @@ DEFAULT_PLANS = [{"days": 30, "price": 29000}, {"days": 90, "price": 69000}, {"d
 DEFAULT_FAST_PLAN = {"days": 7, "price": 9000}
 DEFAULT_REF_COUNT = 3
 DEFAULT_REF_DAYS = 3
+DEFAULT_LIMIT_MODE = "trial"
+DEFAULT_TRIAL_CHARS = 500
+DEFAULT_TRIAL_FILES = 1
 
 
 def get_plans() -> list[dict]:
@@ -137,6 +140,36 @@ def free_files() -> int:
 
 def free_chars() -> int:
     return int(db.get_setting("free_chars", os.getenv("FREE_CHARS_PER_DAY", "10000")))
+
+
+def limit_mode() -> str:
+    # "trial" (bir martalik sinov) yoki "daily" (kunlik)
+    mode = db.get_setting("limit_mode", os.getenv("LIMIT_MODE", DEFAULT_LIMIT_MODE))
+    return "daily" if mode == "daily" else "trial"
+
+
+def set_limit_mode(mode: str) -> None:
+    db.set_setting("limit_mode", "daily" if mode == "daily" else "trial")
+
+
+def is_trial_mode() -> bool:
+    return limit_mode() == "trial"
+
+
+def trial_chars() -> int:
+    return int(db.get_setting("trial_chars", os.getenv("TRIAL_CHARS", str(DEFAULT_TRIAL_CHARS))))
+
+
+def set_trial_chars(chars: int) -> None:
+    db.set_setting("trial_chars", str(max(0, int(chars))))
+
+
+def trial_files() -> int:
+    return int(db.get_setting("trial_files", os.getenv("TRIAL_FILES", str(DEFAULT_TRIAL_FILES))))
+
+
+def set_trial_files(files: int) -> None:
+    db.set_setting("trial_files", str(max(0, int(files))))
 
 
 def card_info() -> str:
